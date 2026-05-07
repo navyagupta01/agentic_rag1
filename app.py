@@ -132,7 +132,7 @@ with st.sidebar:
     model_choice = st.selectbox(
         "LLM Model",
         options=[
-            "google/gemma-3-4b-it:free",
+            "google/gemma-2-9b-it:free",
             "meta-llama/llama-3.2-3b-instruct:free",
             "qwen/qwen3-8b:free",
             "deepseek/deepseek-r1:free",
