@@ -20,7 +20,7 @@ from typing import List, Tuple
 logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "google/gemma-3-4b-it:free"
+DEFAULT_MODEL = "google/gemma-2-9b-it:free"
 
 # In-memory cache
 _cache: dict = {}
@@ -152,16 +152,52 @@ def generate_answer(
                 try:
                     detail = response.json().get("error", {}).get("message", "")
                 except Exception:
-                    pass
-                raise RuntimeError(f"OpenRouter API error 400: {detail or response.text[:200]}")
+                    detail = response.text[:300]
+                raise RuntimeError(
+                    f"OpenRouter API error 400: {detail or response.text[:200]}"
+                )
+
+            # Model not found — don't retry, fail fast
+            if response.status_code == 404:
+                detail = ""
+                try:
+                    detail = response.json().get("error", {}).get("message", "")
+                except Exception:
+                    detail = response.text[:300]
+                raise RuntimeError(
+                    f"OpenRouter API error 404: {detail or 'No endpoints found for this model'}. "
+                    "Try switching to a different model in the sidebar."
+                )
 
             response.raise_for_status()
 
             data = response.json()
-            answer_text = data["choices"][0]["message"]["content"].strip()
+
+            # Guard against empty or malformed response
+            choices = data.get("choices")
+            if not choices:
+                last_error = (
+                    f"Model returned an empty response (no choices). "
+                    f"Full response: {data}"
+                )
+                logger.warning(f"Attempt {attempt+1}: {last_error}")
+                time.sleep(10)
+                continue
+
+            content = choices[0].get("message", {}).get("content", "").strip()
+            if not content:
+                finish_reason = choices[0].get("finish_reason", "unknown")
+                last_error = (
+                    f"Model returned empty content "
+                    f"(finish_reason={finish_reason}). "
+                    f"Full response: {data}"
+                )
+                logger.warning(f"Attempt {attempt+1}: {last_error}")
+                time.sleep(10)
+                continue
 
             result = {
-                "answer": answer_text,
+                "answer": content,
                 "sources": [cand[0] for cand in context_chunks],
                 "query_type": query_type,
                 "model": model,
@@ -177,7 +213,7 @@ def generate_answer(
         except RuntimeError:
             raise
         except requests.exceptions.Timeout:
-            last_error = "Request timed out."
+            last_error = "Request timed out after 60 seconds."
             logger.warning(f"Attempt {attempt+1} timed out.")
             time.sleep(10)
         except requests.exceptions.HTTPError as e:
@@ -185,12 +221,26 @@ def generate_answer(
             try:
                 detail = response.json().get("error", {}).get("message", "")
             except Exception:
-                pass
-            last_error = f"OpenRouter API error {response.status_code}: {detail or str(e)}"
+                detail = response.text[:300]
+            last_error = (
+                f"OpenRouter API error {response.status_code}: "
+                f"{detail or str(e) or 'unknown error'}"
+            )
             logger.warning(f"Attempt {attempt+1} failed: {last_error}")
+            # Don't retry client errors other than 429
+            if response.status_code in (401, 403, 404):
+                break
+            time.sleep(10)
+        except requests.exceptions.ConnectionError:
+            last_error = "Connection error. Check your internet connection."
+            logger.warning(f"Attempt {attempt+1} connection error.")
+            time.sleep(10)
+        except Exception as e:
+            last_error = f"Unexpected error: {type(e).__name__}: {e}"
+            logger.exception(f"Attempt {attempt+1} unexpected error: {e}")
             time.sleep(10)
 
     raise RuntimeError(
-        f"Failed after 3 attempts. Last error: {last_error}\n"
+        f"Failed after 3 attempts. Last error: {last_error} "
         "Try switching to a different model in the sidebar."
     )
